@@ -232,8 +232,8 @@ reg_rand_samp <- function(test, col_name, perc, Under = TRUE){
   bal_samp <- RandOverClassif(name, test, C.perc=over_perc)
   
   if (Under == TRUE){
-    und_perc <- ifelse(age_perc<1,age_perc,1)
-    bal_samp <- RandUnderClassif(age_bin ~ ., bal_samp, C.perc=und_perc)
+    und_perc <- ifelse(under_perc<1,under_perc,1)
+    bal_samp <- RandUnderClassif(name, bal_samp, C.perc=und_perc)
   }
   
   return(bal_samp)
@@ -260,25 +260,25 @@ imb_perc_comp <- function(test, name, samp_lim){
 resampling_comb <- function(xactions, user_resample){
   
   user_df <- sqldf(
-    "select name,
-  count(name) count
+    "select user_id,
+   count(user_id) count
    from user_resample
-   group by name")
+   group by user_id")
   
   
   Resampled_train_actions <- NULL
   
   for(i in 1:nrow(user_df)){
-    user_name <- user_df[i,"name"]
+    user_id <- user_df[i,"user_id"]
     count <- user_df[i,"count"]
-    print(user_name)
+    print(user_id)
     print(count)
-    name_ind <- which(xactions[,"user_name"] == user_name)
+    name_ind <- which(xactions[,"user_id"] == user_id)
     mini_acts <- NULL
     for(j in 1:count){
       tmp <- xactions[name_ind,]
-      new_id <- paste(user_name,j,sep = "_")
-      tmp[,"user_id"] <- rep(new_id,nrow(tmp))
+      new_id <- paste(user_id,j,sep = "_")
+      tmp[,"user_id_1"] <- rep(new_id,nrow(tmp))
       mini_acts <- rbind.data.frame(mini_acts,tmp)
     }
     Resampled_train_actions <- rbind.data.frame(Resampled_train_actions,
@@ -289,7 +289,8 @@ resampling_comb <- function(xactions, user_resample){
 }
 
 level_sampling <- function(data, samp_lim, Under){
-  train1 <- RandOverClassif(user_gender ~ ., train, C.perc="balance")
+  
+  train1 <- RandOverClassif(user_gender ~ ., data, C.perc="balance")
   
   age_perc <- imb_perc_comp(train1, name = "user_age_bin", 
                             samp_lim = samp_lim)
@@ -309,10 +310,10 @@ level_sampling <- function(data, samp_lim, Under){
 
 direct_sampling <- function(data, samp_lim, Under){
   
-  comb_perc <- imb_perc_comp(train, name = "Bal_Var", 
+  comb_perc <- imb_perc_comp(data, name = "Bal_Var", 
                              samp_lim = samp_lim)
   
-  train4 <- reg_rand_samp(train,"Bal_Var",perc = comb_perc, 
+  train4 <- reg_rand_samp(data,"Bal_Var",perc = comb_perc, 
                           Under = und_samp_typ)
   
   return(train4)
@@ -348,10 +349,11 @@ data_test <- function(xactions_test_in,xactions_test_out){
 
 sampling_data <- function(train,samp_lim, Under, samp_method){
   if(samp_method == "levels"){
+    
     samp_res <- level_sampling(data = train, samp_lim = samp_lim, 
                                Under = und_samp_typ)
     
-    user_resample <- samp_res[3]
+    user_resample <- samp_res[[3]]
     
     # Reconversion back to actions table
     
@@ -365,7 +367,58 @@ sampling_data <- function(train,samp_lim, Under, samp_method){
     
     xactions_train_resamp <- resampling_comb(xactions, user_resample)
   }
-  return(xactions_train_resamp)
+  res <- list(xactions_train_resamp,user_resample)
+  
+  return(res)
+}
+
+getUserRatingsData <- function(xacts, itemType, itemProperty = "item_name") {
+  xacts$days_from_visit <- xacts$days_from_visit + 1
+  q <- "select user_id, 
+          %s, 
+          SUM(1.0/days_from_visit) rating 
+        from xacts
+        where item_type_code like '%s'
+        --and sale_price > 0
+        group by user_id, %s
+        order by user_id, %s"
+  q <- sprintf(q, itemProperty, itemType, itemProperty, itemProperty)
+  rData <- sqldf(q)
+  return(rData)
+}
+
+df2RatingsMatrix <- function(dfRatings) {
+  #dfRatings <- rmNoise(dfRatings, dfRatings$rating)
+  rateMat <- as(dfRatings, "realRatingMatrix")
+  rateMat
+}
+
+getNormalizedRatingsMatrix <- function(dfRatings, normType = NULL) {
+  r <- df2RatingsMatrix(dfRatings)
+  return(normalize(r, method = normType))
+}
+
+getRecommender <- function(rateMat, recMethod) {
+  r <- Recommender(rateMat, method = recMethod)
+}
+
+product_counter <- function(p,ratings_mat){
+  p1 <- as(p, "list")
+  
+  products <- colnames(ratings_mat)
+  count_recos <- rep(0, length(products))
+  
+  product_recos <- data.frame(products, count_recos)
+  
+  for(user in 1:length(p1)){
+    for(product in p1[[user]]){
+      #product <- p1[[1]][1]
+      ind <- which(product_recos$products == product)
+      product_recos$count_recos[ind] <- product_recos$count_recos[ind] + 1
+    }
+  }
+  product_recos <- product_recos[order(product_recos$count_recos, decreasing = TRUE),]
+  return(product_recos)
 }
 
 
