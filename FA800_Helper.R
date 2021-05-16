@@ -85,6 +85,26 @@ getUserProd <- function(xactions){
   return(user_data)
 }
 
+getUserdata2 <- function(xactions){
+  
+  user_data <- sqldf("select user_id,
+            user_age,
+            user_gender,
+            --user_zipcode,
+            MAX(num_user_visits) num_visits,
+            MAX(days_from_visit) total_days,
+            Bal_Var,
+            user_age_bin,
+            num_visits_bin,
+            cast(MAX(days_from_visit) as float)/cast(MAX(num_user_visits) as float) avg_visit_days
+            from xactions
+            --where sale_price > 0
+            group by user_id
+            order by user_id asc")
+  
+  return(user_data)
+}
+
 ###############################################################
 
 find_col_ind <- function(col_names, xactions){
@@ -261,7 +281,11 @@ resampling_comb <- function(xactions, user_resample){
   
   user_df <- sqldf(
     "select user_id,
-   count(user_id) count
+            user_age_bin,
+            num_visits_bin,
+            user_gender,
+            Bal_Var,
+            count(user_id) count
    from user_resample
    group by user_id")
   
@@ -278,7 +302,13 @@ resampling_comb <- function(xactions, user_resample){
     for(j in 1:count){
       tmp <- xactions[name_ind,]
       new_id <- paste(user_id,j,sep = "_")
+      
       tmp[,"user_id_1"] <- rep(new_id,nrow(tmp))
+      tmp[,"user_age_bin"] <- rep(user_df[i,"user_age_bin"],nrow(tmp))
+      tmp[,"num_visits_bin"] <- rep(user_df[i,"num_visits_bin"],nrow(tmp))
+      tmp[,"user_gender"] <- rep(user_df[i,"user_gender"],nrow(tmp))
+      tmp[,"Bal_Var"] <- rep(user_df[i,"Bal_Var"],nrow(tmp))
+      
       mini_acts <- rbind.data.frame(mini_acts,tmp)
     }
     Resampled_train_actions <- rbind.data.frame(Resampled_train_actions,
@@ -419,6 +449,150 @@ product_counter <- function(p,ratings_mat){
   }
   product_recos <- product_recos[order(product_recos$count_recos, decreasing = TRUE),]
   return(product_recos)
+}
+
+bin_search <- function(name,users,colname){
+  ind <- which(users$user_id == name)
+  return(users[, colname][ind])
+}
+
+cross_val_bin_comp <- function(preMatrix,k_cross,colname,bins,
+                               recMethod = "UBCF", k_val = 5){
+  
+  users <- getUserdata2(xactions)
+  
+  k_binwise_acc <- NULL
+  
+  for(i in bins){
+    bin_k_acc <- NULL
+    
+    for(j in 1:k_val){
+      print(i)
+      print(j)
+      
+      train_ind <- k_cross@runsTrain[[j]]
+      test_ind <- which(!(c(1:nrow(preMatrix)) %in% train_ind))
+      
+      train_users <- rownames(preMatrix[train_ind,])
+      train_bins <- sapply(train_users, bin_search, users,colname)
+      
+      # Bin wise accuracy
+      
+      test_users <- rownames(preMatrix[test_ind,])
+      test_bins <- sapply(test_users, bin_search, users,colname)
+      
+      rows <- which(test_bins == i)
+      test_count <- length(rows)
+      
+      train <- which(train_bins == i)
+      train_count <- length(train)
+      
+      test_input <- k_cross@knownData[test_ind[rows],]
+      test_output <- k_cross@unknownData[test_ind[rows],]
+      
+      train_input <- k_cross@knownData[train_ind,]
+      
+      r <- Recommender(train_input, recMethod)
+      p1 <- predict(r, test_input, type=predType, n = nPred)
+      
+      
+      bin_acc <- calcPredictionAccuracy(p1, test_output, 
+                                        given=gn, goodRating=0)
+      
+      tmp_j <- c(train_count,test_count, bin_acc)
+      
+      bin_k_acc <- rbind(bin_k_acc, tmp_j)
+      
+    }
+    tmp_i <- apply(bin_k_acc, mean, MARGIN = 2)
+    
+    tmp_row <- c(i,round(tmp_i,4))
+    
+    k_binwise_acc <- rbind.data.frame(k_binwise_acc,tmp_row)
+    
+    colnames(k_binwise_acc) <- c("Bin","Train","Test","TP","FP","FN","TN",
+                                 "precision","recall","TPR","FPR")
+    
+  }
+  k_binwise_acc <- as.data.frame(k_binwise_acc[,c(1,4)])
+  return(k_binwise_acc)
+}
+
+cross_val_comp <- function(r_matrix,test_sp, k_cross,k_val,gn,recMethod, 
+                           predType, nPred){
+  
+  results <- evaluate(k_cross, method=recMethod, type = predType,n=nPred)
+  k_fold_acc <- avg(results)
+  return(k_fold_acc)
+}
+
+
+dataset_cv_computer <- function(xactions,all_methods,ratings_type,
+                                rec_methods,colname,dataset,test_sp,
+                                k_val,gn){
+  
+  bins <- levels(as.factor(xactions[,colname]))
+  
+  b_len <- length(bins)
+  
+  result_cols <- c("Dataset","Ratings_Type","Method","Bins","Accuracy")
+  
+  result <- NULL
+  
+  ratingsDF <- getUserRatingsData(xactions, itemType = "%")
+  ratings_mat_pr_nrml <- df2RatingsMatrix(ratingsDF)
+  binary_mat <- binarize(ratings_mat_pr_nrml, minRating=0.0001)
+  ratings_mat <- getNormalizedRatingsMatrix(ratingsDF, normType = NULL)
+  
+  
+  k_cross <- evaluationScheme(ratings_mat, method="cross", train=test_sp,
+                              k=k_val, given = gn, goodRating = 0)
+  
+  f_cross <- evaluationScheme(binary_mat, method="cross", train=test_sp,
+                              k=k_val, given = gn, goodRating = 0)
+  
+  for (type in ratings_type){
+    
+    if (type == "Computed"){
+      
+      for(recMethod in all_methods){
+        print(recMethod)
+        print(type)
+        extra_cols <- c(dataset, colname, type,recMethod)
+        extra_cols <- matrix(rep(extra_cols,b_len),ncol = length(extra_cols), 
+                             byrow = TRUE)
+        
+        tmp_acc <- cross_val_bin_comp(ratings_mat,k_cross,
+                                      recMethod = recMethod,colname,bins, 
+                                      k_val = k_val)
+        
+        tmp_row <- cbind.data.frame(extra_cols,tmp_acc)
+        
+        result <- rbind.data.frame(result,tmp_row)
+      }
+      
+    }else{
+      print("Correct")
+      for(recMethod in rec_methods){
+        print(recMethod)
+        print(type)
+        
+        extra_cols <- c(dataset, colname, type,recMethod)
+        extra_cols <- matrix(rep(extra_cols,b_len),ncol = length(extra_cols), 
+                             byrow = TRUE)
+        
+        tmp_acc <- cross_val_bin_comp(binary_mat,f_cross,
+                                      recMethod = recMethod,colname, bins, 
+                                      k_val = k_val)
+        
+        tmp_row <- cbind.data.frame(extra_cols,tmp_acc)
+        
+        result <- rbind.data.frame(result,tmp_row)
+        
+      }
+    }
+   }
+  return(result)
 }
 
 

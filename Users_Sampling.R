@@ -66,10 +66,12 @@ plot(user_data$Bal_Var)
 if(samp_method == "None"){
   
   xactions_train_resamp <- sqldf(
-    "select *
-   from xactions
-   where user_id in (select user_id 
-                          from user_data)")
+    "select a.*,
+    b.user_age_bin,
+    b.num_visits_bin,
+    b.Bal_Var
+   from xactions a, user_data b
+   where a.user_id = b.user_id")
   
 }else{
   result <- sampling_data(train =  user_data, samp_lim, Under = und_samp_typ, 

@@ -6,10 +6,7 @@ getwd()
 name <- paste("Reco_dataset_clean",".csv",sep = "")
 xactions <- read.csv(name)
 
-source("FA800_Helper.r")
-
-colnames(xactions)
-
+source(file.path("C:\\Users\\v-anirudhs\\Documents\\Project\\FA800", "FA800_Helper.r"))
 
 user_data <- getUserdata(xactions)
 
